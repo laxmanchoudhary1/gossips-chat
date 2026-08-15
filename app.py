@@ -1,13 +1,17 @@
 import sqlite3
 import re
-from flask import Flask, render_template, request, redirect, url_for, session, flash
+import os
+from flask import Flask, render_template, request, redirect, url_for, session, flash, send_from_directory
 from flask_socketio import SocketIO, join_room, leave_room, emit
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.secret_key = 'gossips_chat_super_secret_key'
-socketio = SocketIO(app)
+app.secret_key = 'syncsphere_super_secret_key'
+app.config['UPLOAD_FOLDER'] = 'static/uploads'
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+socketio = SocketIO(app)
 room_users = {} # room -> set of usernames
 
 def init_db():
@@ -34,6 +38,10 @@ def init_db():
                 room TEXT NOT NULL,
                 username TEXT NOT NULL,
                 msg TEXT NOT NULL,
+                file_url TEXT,
+                file_name TEXT,
+                reactions TEXT DEFAULT '{}',
+                is_pinned INTEGER DEFAULT 0,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -175,9 +183,12 @@ def handle_join(data):
                     room_users[room] = set()
                 room_users[room].add(username)
                 
-                # Fetch recent message history
-                cursor.execute('SELECT username, msg FROM messages WHERE room = ? ORDER BY id ASC LIMIT 50', (room,))
-                history = [{'username': row[0], 'msg': row[1]} for row in cursor.fetchall()]
+                # Fetch history & pinned messages
+                cursor.execute('SELECT id, username, msg, file_url, file_name, reactions, is_pinned FROM messages WHERE room = ? ORDER BY id ASC LIMIT 50', (room,))
+                history = [{
+                    'id': row[0], 'username': row[1], 'msg': row[2], 
+                    'file_url': row[3], 'file_name': row[4], 'reactions': row[5], 'is_pinned': row[6]
+                } for row in cursor.fetchall()]
                 
                 emit('join_status', {'status': 'success', 'room': room, 'password': group[2], 'history': history}, room=request.sid)
                 emit('room_users', {'users': list(room_users[room])}, room=room)
@@ -210,14 +221,65 @@ def handle_leave(data):
 def handle_message(data):
     room = data['room']
     username = data['username']
-    msg = data['msg']
+    msg = data.get('msg', '')
+    file_url = data.get('file_url')
+    file_name = data.get('file_name')
     
     with sqlite3.connect('database.db') as conn:
         cursor = conn.cursor()
-        cursor.execute('INSERT INTO messages (room, username, msg) VALUES (?, ?, ?)', (room, username, msg))
+        cursor.execute('''
+            INSERT INTO messages (room, username, msg, file_url, file_name, reactions, is_pinned) 
+            VALUES (?, ?, ?, ?, ?, '{}', 0)
+        ''', (room, username, msg, file_url, file_name))
+        conn.commit()
+        msg_id = cursor.lastrowid
+        
+    emit('message', {
+        'id': msg_id, 'username': username, 'msg': msg, 
+        'file_url': file_url, 'file_name': file_name, 'reactions': {}, 'is_pinned': 0
+    }, room=room)
+
+@socketio.on('add_reaction')
+def handle_reaction(data):
+    msg_id = data['msg_id']
+    emoji = data['emoji']
+    username = data['username']
+    room = data['room']
+    
+    with sqlite3.connect('database.db') as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT reactions FROM messages WHERE id = ?', (msg_id,))
+        row = cursor.fetchone()
+        if row:
+            import json
+            reactions = json.loads(row[0] or '{}')
+            if emoji not in reactions:
+                reactions[emoji] = []
+            if username in reactions[emoji]:
+                reactions[emoji].remove(username)
+                if not reactions[emoji]:
+                    del reactions[emoji]
+            else:
+                reactions[emoji].append(username)
+            
+            new_react_str = json.dumps(reactions)
+            cursor.execute('UPDATE messages SET reactions = ? WHERE id = ?', (new_react_str, msg_id))
+            conn.commit()
+            
+            emit('update_reaction', {'msg_id': msg_id, 'reactions': reactions}, room=room)
+
+@socketio.on('toggle_pin')
+def handle_pin(data):
+    msg_id = data['msg_id']
+    room = data['room']
+    is_pinned = data['is_pinned']
+    
+    with sqlite3.connect('database.db') as conn:
+        cursor = conn.cursor()
+        cursor.execute('UPDATE messages SET is_pinned = ? WHERE id = ?', (1 if is_pinned else 0, msg_id))
         conn.commit()
         
-    emit('message', {'username': username, 'msg': msg}, room=room)
+    emit('update_pin', {'msg_id': msg_id, 'is_pinned': is_pinned}, room=room)
 
 @socketio.on('typing')
 def handle_typing(data):
