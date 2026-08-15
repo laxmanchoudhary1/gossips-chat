@@ -14,7 +14,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
+            password TEXT NOT NULL,
+            mobile TEXT NOT NULL
         )
     ''')
     cursor.execute('''
@@ -40,14 +41,17 @@ def signup():
     if request.method == 'POST':
         username = request.form['username'].strip()
         password = request.form['password'].strip()
-        if not username or not password:
+        mobile = request.form['mobile'].strip()
+        
+        if not username or not password or not mobile:
             flash('All fields are required!', 'error')
             return redirect(url_for('signup'))
+            
         hashed_password = generate_password_hash(password)
         try:
             conn = sqlite3.connect('database.db')
             cursor = conn.cursor()
-            cursor.execute('INSERT INTO users (username, password) VALUES (?, ?)', (username, hashed_password))
+            cursor.execute('INSERT INTO users (username, password, mobile) VALUES (?, ?, ?)', (username, hashed_password, mobile))
             conn.commit()
             conn.close()
             flash('Account created successfully! Please login.', 'success')
