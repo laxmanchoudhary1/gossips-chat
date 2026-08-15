@@ -11,7 +11,7 @@
     <header class="bg-slate-900/90 backdrop-blur-md border-b border-slate-800 px-4 py-3 flex justify-between items-center z-10">
         <h1 class="text-lg font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-500">Gossips Chat</h1>
         <div class="flex items-center space-x-3">
-            <span class="text-xs text-slate-300">👤 <strong class="text-purple-400">{{ username }}</strong></span>
+            <a href="/profile" class="text-xs text-slate-300 hover:text-purple-400">👤 <strong class="text-purple-400">{{ username }}</strong></a>
             <a href="/logout" class="bg-red-500/10 text-red-400 border border-red-500/30 px-2.5 py-1 rounded-lg text-xs hover:bg-red-500 hover:text-white transition">Logout</a>
         </div>
     </header>
@@ -39,16 +39,20 @@
             <div class="bg-slate-900/40 border-b border-slate-800 px-4 py-2 flex justify-between items-center text-xs">
                 <span id="current-room-label" class="font-semibold text-purple-400"></span>
                 <div class="flex items-center gap-2">
-                    <button onclick="openSettings()" class="bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/30 px-2.5 py-1 rounded-lg">⚙️ Group Info</button>
-                    <button onclick="location.reload()" class="bg-slate-800 hover:bg-slate-700 px-2.5 py-1 rounded-lg border border-slate-700">Switch Room</button>
+                    <button onclick="openOnlineModal()" class="bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 px-2.5 py-1 rounded-lg">👥 Online (<span id="online-count">0</span>)</button>
+                    <button onclick="openSettings()" class="bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/30 px-2.5 py-1 rounded-lg">⚙️ Info</button>
+                    <button onclick="leaveRoom()" class="bg-slate-800 hover:bg-slate-700 px-2.5 py-1 rounded-lg border border-slate-700">Switch Room</button>
                 </div>
             </div>
             
             <div id="messages" class="flex-1 overflow-y-auto p-4 space-y-3 flex flex-col"></div>
             
+            <!-- Typing Indicator -->
+            <div id="typing-indicator" class="px-4 py-1 text-[11px] text-slate-400 italic h-5"></div>
+
             <div class="p-3 bg-slate-900/90 border-t border-slate-800">
                 <form id="chat-form" onsubmit="sendMessage(event)" class="flex gap-2 max-w-4xl mx-auto">
-                    <input type="text" id="message-input" placeholder="Type your message..." autocomplete="off" class="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-purple-500 text-slate-100">
+                    <input type="text" id="message-input" oninput="handleTyping()" placeholder="Type your message..." autocomplete="off" class="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-purple-500 text-slate-100">
                     <button type="submit" class="bg-gradient-to-r from-purple-500 to-pink-500 px-5 py-2.5 rounded-xl text-sm font-semibold hover:opacity-90 shadow-lg shadow-purple-500/25">Send</button>
                 </form>
             </div>
@@ -73,11 +77,21 @@
         </div>
     </div>
 
+    <!-- Online Members Modal -->
+    <div id="online-modal" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 px-4">
+        <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl w-full max-w-sm shadow-2xl space-y-4">
+            <h3 class="text-lg font-bold text-blue-400">Online Members in Room</h3>
+            <ul id="online-users-list" class="space-y-2 text-xs max-h-48 overflow-y-auto"></ul>
+            <button onclick="closeOnlineModal()" class="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 py-2.5 rounded-xl text-xs font-semibold transition">Close</button>
+        </div>
+    </div>
+
     <script>
         const socket = io();
         const username = "{{ username }}";
         let currentRoom = "";
         let currentRoomPass = "";
+        let typingTimeout = null;
 
         function joinGroup() {
             const room = document.getElementById('room-name').value.trim();
@@ -100,21 +114,75 @@
                 document.getElementById('chat-screen').classList.remove('hidden');
                 document.getElementById('current-room-label').innerText = `Room: #${currentRoom}`;
                 
-                // Populate modal info
                 document.getElementById('modal-room-name').innerText = currentRoom;
                 document.getElementById('modal-room-pass').innerText = currentRoomPass;
+
+                // Load history
+                const messagesDiv = document.getElementById('messages');
+                messagesDiv.innerHTML = '';
+                data.history.forEach(item => {
+                    appendMessage(item.username, item.msg);
+                });
             } else {
                 errorBox.innerText = data.msg;
                 errorBox.classList.remove('hidden');
             }
         });
 
+        function leaveRoom() {
+            if (currentRoom) {
+                socket.emit('leave_group', { room: currentRoom, username: username });
+            }
+            currentRoom = "";
+            document.getElementById('chat-screen').classList.add('hidden');
+            document.getElementById('join-screen').classList.remove('hidden');
+            document.getElementById('messages').innerHTML = '';
+            document.getElementById('room-name').value = '';
+            document.getElementById('room-pass').value = '';
+        }
+
+        function handleTyping() {
+            if (!currentRoom) return;
+            socket.emit('typing', { room: currentRoom, username: username, is_typing: true });
+            clearTimeout(typingTimeout);
+            typingTimeout = setTimeout(() => {
+                socket.emit('typing', { room: currentRoom, username: username, is_typing: false });
+            }, 1000);
+        }
+
+        socket.on('display_typing', function(data) {
+            const typingIndicator = document.getElementById('typing-indicator');
+            if (data.is_typing) {
+                typingIndicator.innerText = `${data.username} is typing...`;
+            } else {
+                typingIndicator.innerText = '';
+            }
+        });
+
+        socket.on('room_users', function(data) {
+            document.getElementById('online-count').innerText = data.users.length;
+            const list = document.getElementById('online-users-list');
+            list.innerHTML = '';
+            data.users.forEach(u => {
+                const li = document.createElement('li');
+                li.className = 'bg-slate-800 px-3 py-2 rounded-xl text-slate-200 flex items-center justify-between';
+                li.innerHTML = `<span>🟢 ${u}</span>`;
+                list.appendChild(li);
+            });
+        });
+
         function openSettings() {
             document.getElementById('settings-modal').classList.remove('hidden');
         }
-
         function closeSettings() {
             document.getElementById('settings-modal').classList.add('hidden');
+        }
+
+        function openOnlineModal() {
+            document.getElementById('online-modal').classList.remove('hidden');
+        }
+        function closeOnlineModal() {
+            document.getElementById('online-modal').classList.add('hidden');
         }
 
         function sendMessage(e) {
@@ -124,35 +192,40 @@
             if (msg) {
                 socket.emit('send_message', { room: currentRoom, username: username, msg: msg });
                 input.value = '';
+                socket.emit('typing', { room: currentRoom, username: username, is_typing: false });
             }
         }
 
         socket.on('message', function(data) {
+            appendMessage(data.username, data.msg);
+        });
+
+        function appendMessage(sender, msg) {
             const messagesDiv = document.getElementById('messages');
-            const isMe = data.username === username;
+            const isMe = sender === username;
             const messageWrapper = document.createElement('div');
             messageWrapper.className = `flex flex-col ${isMe ? 'items-end' : 'items-start'} my-0.5`;
             const bubble = document.createElement('div');
             bubble.className = `max-w-xs md:max-w-md px-3.5 py-2 rounded-2xl text-xs md:text-sm ${
-                data.username === 'System' 
+                sender === 'System' 
                     ? 'bg-slate-800 text-slate-400 mx-auto text-center italic w-full' 
                     : isMe 
                 ? 'bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-br-none' 
                 : 'bg-slate-800 border border-slate-700 text-slate-100 rounded-bl-none'
             }`;
-            if (data.username !== 'System') {
+            if (sender !== 'System') {
                 const author = document.createElement('div');
                 author.className = 'text-[10px] text-purple-300 mb-0.5 font-semibold';
-                author.innerText = data.username;
+                author.innerText = sender;
                 bubble.appendChild(author);
             }
             const textNode = document.createElement('div');
-            textNode.innerText = data.msg;
+            textNode.innerText = msg;
             bubble.appendChild(textNode);
             messageWrapper.appendChild(bubble);
             messagesDiv.appendChild(messageWrapper);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        });
+        }
     </script>
 </body>
 </html>
