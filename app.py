@@ -8,25 +8,24 @@ app.secret_key = 'gossips_chat_super_secret_key'
 socketio = SocketIO(app)
 
 def init_db():
-    conn = sqlite3.connect('database.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            mobile TEXT NOT NULL
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS groups (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    with sqlite3.connect('database.db') as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                mobile TEXT UNIQUE NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL
+            )
+        ''')
+        conn.commit()
 
 init_db()
 
@@ -40,42 +39,42 @@ def index():
 def signup():
     if request.method == 'POST':
         username = request.form['username'].strip()
-        password = request.form['password'].strip()
         mobile = request.form['mobile'].strip()
+        password = request.form['password'].strip()
         
-        if not username or not password or not mobile:
+        if not username or not mobile or not password:
             flash('All fields are required!', 'error')
             return redirect(url_for('signup'))
             
         hashed_password = generate_password_hash(password)
         try:
-            conn = sqlite3.connect('database.db')
-            cursor = conn.cursor()
-            cursor.execute('INSERT INTO users (username, password, mobile) VALUES (?, ?, ?)', (username, hashed_password, mobile))
-            conn.commit()
-            conn.close()
+            with sqlite3.connect('database.db') as conn:
+                cursor = conn.cursor()
+                cursor.execute('INSERT INTO users (username, password, mobile) VALUES (?, ?, ?)', (username, hashed_password, mobile))
+                conn.commit()
             flash('Account created successfully! Please login.', 'success')
             return redirect(url_for('login'))
         except sqlite3.IntegrityError:
-            flash('Username already exists! Choose another.', 'error')
+            flash('Username or Mobile number already registered!', 'error')
             return redirect(url_for('signup'))
     return render_template('signup.html')
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        username = request.form['username'].strip()
+        identifier = request.form['identifier'].strip() # Username ya Mobile number kuch bhi ho sakta hai
         password = request.form['password'].strip()
-        conn = sqlite3.connect('database.db')
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
-        user = cursor.fetchone()
-        conn.close()
+        
+        with sqlite3.connect('database.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM users WHERE username = ? OR mobile = ?', (identifier, identifier))
+            user = cursor.fetchone()
+            
         if user and check_password_hash(user[2], password):
-            session['username'] = user[1]
+            session['username'] = user[1] # user[1] is username
             return redirect(url_for('chat'))
         else:
-            flash('Invalid username or incorrect password!', 'error')
+            flash('Invalid username/mobile or incorrect password!', 'error')
             return redirect(url_for('login'))
     return render_template('login.html')
 
@@ -95,24 +94,26 @@ def handle_join(data):
     username = data['username']
     room = data['room'].strip()
     password = data['password'].strip()
-    conn = sqlite3.connect('database.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM groups WHERE name = ?', (room,))
-    group = cursor.fetchone()
-    if group:
-        if group[2] == password:
+    
+    with sqlite3.connect('database.db') as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM groups WHERE name = ?', (room,))
+        group = cursor.fetchone()
+        
+        if group:
+            if check_password_hash(group[2], password):
+                join_room(room)
+                emit('join_status', {'status': 'success', 'room': room}, room=request.sid)
+                emit('message', {'username': 'System', 'msg': f'{username} has joined the room.'}, room=room)
+            else:
+                emit('join_status', {'status': 'error', 'msg': 'Incorrect group password! Access denied.'}, room=request.sid)
+        else:
+            hashed_room_pass = generate_password_hash(password)
+            cursor.execute('INSERT INTO groups (name, password) VALUES (?, ?)', (room, hashed_room_pass))
+            conn.commit()
             join_room(room)
             emit('join_status', {'status': 'success', 'room': room}, room=request.sid)
-            emit('message', {'username': 'System', 'msg': f'{username} has joined the room.'}, room=room)
-        else:
-            emit('join_status', {'status': 'error', 'msg': 'Incorrect group password! Access denied.'}, room=request.sid)
-    else:
-        cursor.execute('INSERT INTO groups (name, password) VALUES (?, ?)', (room, password))
-        conn.commit()
-        join_room(room)
-        emit('join_status', {'status': 'success', 'room': room}, room=request.sid)
-        emit('message', {'username': 'System', 'msg': f'Group "{room}" created and {username} joined.'}, room=room)
-    conn.close()
+            emit('message', {'username': 'System', 'msg': f'Group "{room}" created and {username} joined.'}, room=room)
 
 @socketio.on('send_message')
 def handle_message(data):
