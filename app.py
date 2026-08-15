@@ -5,7 +5,6 @@ import json
 from flask import Flask, render_template, request, redirect, url_for, session, flash, send_from_directory
 from flask_socketio import SocketIO, join_room, leave_room, emit
 from werkzeug.security import generate_password_hash, check_password_hash
-from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 app.secret_key = 'syncsphere_super_secret_key'
@@ -42,6 +41,7 @@ def init_db():
                 msg TEXT NOT NULL,
                 file_url TEXT,
                 file_name TEXT,
+                audio_url TEXT,
                 reactions TEXT DEFAULT '{}',
                 is_pinned INTEGER DEFAULT 0,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -189,13 +189,29 @@ def logout():
 def handle_join(data):
     username = data['username']
     room = data['room'].strip()
-    password = data['password'].strip()
+    password = data.get('password', '').strip()
+    is_dm = data.get('is_dm', False)
     
     with sqlite3.connect('database.db') as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT status FROM users WHERE username = ?', (username,))
         user_status_row = cursor.fetchone()
         user_status = user_status_row[0] if user_status_row else 'Online 🟢'
+
+        if is_dm:
+            join_room(room)
+            if room not in room_users:
+                room_users[room] = {}
+            room_users[room][username] = user_status
+            
+            cursor.execute('SELECT id, username, msg, file_url, file_name, audio_url, reactions, is_pinned FROM messages WHERE room = ? ORDER BY id ASC LIMIT 50', (room,))
+            history = [{
+                'id': row[0], 'username': row[1], 'msg': row[2], 
+                'file_url': row[3], 'file_name': row[4], 'audio_url': row[5], 'reactions': row[6], 'is_pinned': row[7]
+            } for row in cursor.fetchall()]
+
+            emit('join_status', {'status': 'success', 'room': room, 'is_dm': True, 'history': history, 'polls': []}, room=request.sid)
+            return
 
         cursor.execute('SELECT * FROM groups WHERE name = ?', (room,))
         group = cursor.fetchone()
@@ -207,10 +223,10 @@ def handle_join(data):
                     room_users[room] = {}
                 room_users[room][username] = user_status
                 
-                cursor.execute('SELECT id, username, msg, file_url, file_name, reactions, is_pinned FROM messages WHERE room = ? ORDER BY id ASC LIMIT 50', (room,))
+                cursor.execute('SELECT id, username, msg, file_url, file_name, audio_url, reactions, is_pinned FROM messages WHERE room = ? ORDER BY id ASC LIMIT 50', (room,))
                 history = [{
                     'id': row[0], 'username': row[1], 'msg': row[2], 
-                    'file_url': row[3], 'file_name': row[4], 'reactions': row[5], 'is_pinned': row[6]
+                    'file_url': row[3], 'file_name': row[4], 'audio_url': row[5], 'reactions': row[6], 'is_pinned': row[7]
                 } for row in cursor.fetchall()]
 
                 cursor.execute('SELECT id, question, options, votes, creator FROM polls WHERE room = ?', (room,))
@@ -218,7 +234,7 @@ def handle_join(data):
                     'id': p[0], 'question': p[1], 'options': json.loads(p[2]), 'votes': json.loads(p[3]), 'creator': p[4]
                 } for p in cursor.fetchall()]
                 
-                emit('join_status', {'status': 'success', 'room': room, 'password': group[2], 'history': history, 'polls': polls}, room=request.sid)
+                emit('join_status', {'status': 'success', 'room': room, 'is_dm': False, 'password': group[2], 'history': history, 'polls': polls}, room=request.sid)
                 emit('room_users', {'users': room_users[room]}, room=room)
                 emit('message', {'username': 'System', 'msg': f'{username} joined the room.'}, room=room)
             else:
@@ -231,7 +247,7 @@ def handle_join(data):
                 room_users[room] = {}
             room_users[room][username] = user_status
             
-            emit('join_status', {'status': 'success', 'room': room, 'password': password, 'history': [], 'polls': []}, room=request.sid)
+            emit('join_status', {'status': 'success', 'room': room, 'is_dm': False, 'password': password, 'history': [], 'polls': []}, room=request.sid)
             emit('room_users', {'users': room_users[room]}, room=room)
             emit('message', {'username': 'System', 'msg': f'Group created and {username} joined.'}, room=room)
 
@@ -252,26 +268,27 @@ def handle_message(data):
     msg = data.get('msg', '')
     file_url = data.get('file_url')
     file_name = data.get('file_name')
+    audio_url = data.get('audio_url')
     
     with sqlite3.connect('database.db') as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO messages (room, username, msg, file_url, file_name, reactions, is_pinned) 
-            VALUES (?, ?, ?, ?, ?, '{}', 0)
-        ''', (room, username, msg, file_url, file_name))
+            INSERT INTO messages (room, username, msg, file_url, file_name, audio_url, reactions, is_pinned) 
+            VALUES (?, ?, ?, ?, ?, ?, '{}', 0)
+        ''', (room, username, msg, file_url, file_name, audio_url))
         conn.commit()
         msg_id = cursor.lastrowid
         
     emit('message', {
         'id': msg_id, 'username': username, 'msg': msg, 
-        'file_url': file_url, 'file_name': file_name, 'reactions': {}, 'is_pinned': 0
+        'file_url': file_url, 'file_name': file_name, 'audio_url': audio_url, 'reactions': {}, 'is_pinned': 0
     }, room=room)
 
 @socketio.on('create_poll')
 def handle_create_poll(data):
     room = data['room']
     question = data['question']
-    options = data['options'] # list of strings
+    options = data['options']
     username = data['username']
     
     initial_votes = {opt: [] for opt in options}
@@ -302,7 +319,6 @@ def handle_vote_poll(data):
             options = json.loads(row[0])
             votes = json.loads(row[1])
             
-            # Remove previous votes by this user in this poll
             for opt in options:
                 if username in votes[opt]:
                     votes[opt].remove(username)
