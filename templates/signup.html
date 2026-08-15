@@ -21,15 +21,15 @@
         <form method="POST" class="space-y-3.5">
             <div>
                 <label class="block text-xs font-medium text-slate-400 mb-1">Username</label>
-                <input type="text" name="username" required class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-purple-500 text-slate-100">
+                <input type="text" name="username" required placeholder="Choose unique username" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-purple-500 text-slate-100">
             </div>
             <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1">Mobile Number</label>
-                <input type="tel" name="mobile" required placeholder="Enter mobile number" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-purple-500 text-slate-100">
+                <label class="block text-xs font-medium text-slate-400 mb-1">Mobile Number (10 digits)</label>
+                <input type="tel" name="mobile" required pattern="[0-9]{10}" maxlength="10" placeholder="e.g. 9876543210" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-purple-500 text-slate-100">
             </div>
             <div>
                 <label class="block text-xs font-medium text-slate-400 mb-1">Password</label>
-                <input type="password" name="password" required class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-purple-500 text-slate-100">
+                <input type="password" name="password" required placeholder="Create password" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-purple-500 text-slate-100">
             </div>
             <button type="submit" class="w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:opacity-90 font-semibold py-2.5 rounded-xl text-sm transition duration-200 shadow-lg shadow-purple-500/25">Sign Up</button>
         </form>
