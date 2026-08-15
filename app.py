@@ -31,8 +31,6 @@ init_db()
 
 @app.route('/')
 def index():
-    if 'username' in session:
-        return redirect(url_for('chat'))
     return redirect(url_for('login'))
 
 @app.route('/signup', methods=['GET', 'POST'])
@@ -42,39 +40,38 @@ def signup():
         mobile = request.form['mobile'].strip()
         password = request.form['password'].strip()
         
-        if not username or not mobile or not password:
-            flash('All fields are required!', 'error')
-            return redirect(url_for('signup'))
-            
         hashed_password = generate_password_hash(password)
         try:
             with sqlite3.connect('database.db') as conn:
                 cursor = conn.cursor()
                 cursor.execute('INSERT INTO users (username, password, mobile) VALUES (?, ?, ?)', (username, hashed_password, mobile))
                 conn.commit()
-            flash('Account created successfully! Please login.', 'success')
+            flash('Account created! Please login.', 'success')
             return redirect(url_for('login'))
         except sqlite3.IntegrityError:
-            flash('Username or Mobile number already registered!', 'error')
+            flash('Username or Mobile already taken!', 'error')
             return redirect(url_for('signup'))
     return render_template('signup.html')
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        identifier = request.form['identifier'].strip() # Username ya Mobile number kuch bhi ho sakta hai
+        # Dono fields le lo
+        username = request.form.get('username', '').strip()
+        mobile = request.form.get('mobile', '').strip()
         password = request.form['password'].strip()
         
         with sqlite3.connect('database.db') as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM users WHERE username = ? OR mobile = ?', (identifier, identifier))
+            # Ya to username se ya mobile se check karo
+            cursor.execute('SELECT * FROM users WHERE username = ? OR mobile = ?', (username, mobile))
             user = cursor.fetchone()
             
         if user and check_password_hash(user[2], password):
-            session['username'] = user[1] # user[1] is username
+            session['username'] = user[1]
             return redirect(url_for('chat'))
         else:
-            flash('Invalid username/mobile or incorrect password!', 'error')
+            flash('Invalid details or password!', 'error')
             return redirect(url_for('login'))
     return render_template('login.html')
 
@@ -104,23 +101,20 @@ def handle_join(data):
             if check_password_hash(group[2], password):
                 join_room(room)
                 emit('join_status', {'status': 'success', 'room': room}, room=request.sid)
-                emit('message', {'username': 'System', 'msg': f'{username} has joined the room.'}, room=room)
+                emit('message', {'username': 'System', 'msg': f'{username} joined.'}, room=room)
             else:
-                emit('join_status', {'status': 'error', 'msg': 'Incorrect group password! Access denied.'}, room=request.sid)
+                emit('join_status', {'status': 'error', 'msg': 'Wrong password!'}, room=request.sid)
         else:
-            hashed_room_pass = generate_password_hash(password)
-            cursor.execute('INSERT INTO groups (name, password) VALUES (?, ?)', (room, hashed_room_pass))
+            hashed_pass = generate_password_hash(password)
+            cursor.execute('INSERT INTO groups (name, password) VALUES (?, ?)', (room, hashed_pass))
             conn.commit()
             join_room(room)
             emit('join_status', {'status': 'success', 'room': room}, room=request.sid)
-            emit('message', {'username': 'System', 'msg': f'Group "{room}" created and {username} joined.'}, room=room)
+            emit('message', {'username': 'System', 'msg': f'Group created by {username}'}, room=room)
 
 @socketio.on('send_message')
 def handle_message(data):
-    room = data['room']
-    username = data['username']
-    msg = data['msg']
-    emit('message', {'username': username, 'msg': msg}, room=room)
+    emit('message', {'username': data['username'], 'msg': data['msg']}, room=data['room'])
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)
