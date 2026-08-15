@@ -1,6 +1,7 @@
 import sqlite3
 import re
 import os
+import json
 from flask import Flask, render_template, request, redirect, url_for, session, flash, send_from_directory
 from flask_socketio import SocketIO, join_room, leave_room, emit
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -22,7 +23,8 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT UNIQUE NOT NULL,
                 password TEXT NOT NULL,
-                mobile TEXT UNIQUE NOT NULL
+                mobile TEXT UNIQUE NOT NULL,
+                status TEXT DEFAULT 'Online 🟢'
             )
         ''')
         cursor.execute('''
@@ -43,6 +45,16 @@ def init_db():
                 reactions TEXT DEFAULT '{}',
                 is_pinned INTEGER DEFAULT 0,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS polls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room TEXT NOT NULL,
+                question TEXT NOT NULL,
+                options TEXT NOT NULL,
+                votes TEXT DEFAULT '{}',
+                creator TEXT NOT NULL
             )
         ''')
         conn.commit()
@@ -129,27 +141,35 @@ def profile():
     username = session['username']
     with sqlite3.connect('database.db') as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT username, mobile FROM users WHERE username = ?', (username,))
+        cursor.execute('SELECT username, mobile, status FROM users WHERE username = ?', (username,))
         user_data = cursor.fetchone()
         
     if request.method == 'POST':
-        old_pass = request.form['old_password'].strip()
-        new_pass = request.form['new_password'].strip()
-        
-        with sqlite3.connect('database.db') as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT password FROM users WHERE username = ?', (username,))
-            db_pass = cursor.fetchone()[0]
-            
-        if check_password_hash(db_pass, old_pass):
-            hashed_new = generate_password_hash(new_pass)
+        if 'update_status' in request.form:
+            new_status = request.form['status'].strip()
             with sqlite3.connect('database.db') as conn:
                 cursor = conn.cursor()
-                cursor.execute('UPDATE users SET password = ? WHERE username = ?', (hashed_new, username))
+                cursor.execute('UPDATE users SET status = ? WHERE username = ?', (new_status, username))
                 conn.commit()
-            flash('Password updated successfully!', 'success')
+            flash('Status updated successfully!', 'success')
         else:
-            flash('Incorrect old password!', 'error')
+            old_pass = request.form['old_password'].strip()
+            new_pass = request.form['new_password'].strip()
+            
+            with sqlite3.connect('database.db') as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT password FROM users WHERE username = ?', (username,))
+                db_pass = cursor.fetchone()[0]
+                
+            if check_password_hash(db_pass, old_pass):
+                hashed_new = generate_password_hash(new_pass)
+                with sqlite3.connect('database.db') as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('UPDATE users SET password = ? WHERE username = ?', (hashed_new, username))
+                    conn.commit()
+                flash('Password updated successfully!', 'success')
+            else:
+                flash('Incorrect old password!', 'error')
         return redirect(url_for('profile'))
         
     return render_template('profile.html', user=user_data)
@@ -173,6 +193,10 @@ def handle_join(data):
     
     with sqlite3.connect('database.db') as conn:
         cursor = conn.cursor()
+        cursor.execute('SELECT status FROM users WHERE username = ?', (username,))
+        user_status_row = cursor.fetchone()
+        user_status = user_status_row[0] if user_status_row else 'Online 🟢'
+
         cursor.execute('SELECT * FROM groups WHERE name = ?', (room,))
         group = cursor.fetchone()
         
@@ -180,18 +204,22 @@ def handle_join(data):
             if group[2] == password:
                 join_room(room)
                 if room not in room_users:
-                    room_users[room] = set()
-                room_users[room].add(username)
+                    room_users[room] = {}
+                room_users[room][username] = user_status
                 
-                # Fetch history & pinned messages
                 cursor.execute('SELECT id, username, msg, file_url, file_name, reactions, is_pinned FROM messages WHERE room = ? ORDER BY id ASC LIMIT 50', (room,))
                 history = [{
                     'id': row[0], 'username': row[1], 'msg': row[2], 
                     'file_url': row[3], 'file_name': row[4], 'reactions': row[5], 'is_pinned': row[6]
                 } for row in cursor.fetchall()]
+
+                cursor.execute('SELECT id, question, options, votes, creator FROM polls WHERE room = ?', (room,))
+                polls = [{
+                    'id': p[0], 'question': p[1], 'options': json.loads(p[2]), 'votes': json.loads(p[3]), 'creator': p[4]
+                } for p in cursor.fetchall()]
                 
-                emit('join_status', {'status': 'success', 'room': room, 'password': group[2], 'history': history}, room=request.sid)
-                emit('room_users', {'users': list(room_users[room])}, room=room)
+                emit('join_status', {'status': 'success', 'room': room, 'password': group[2], 'history': history, 'polls': polls}, room=request.sid)
+                emit('room_users', {'users': room_users[room]}, room=room)
                 emit('message', {'username': 'System', 'msg': f'{username} joined the room.'}, room=room)
             else:
                 emit('join_status', {'status': 'error', 'msg': 'Wrong group password!'}, room=request.sid)
@@ -200,11 +228,11 @@ def handle_join(data):
             conn.commit()
             join_room(room)
             if room not in room_users:
-                room_users[room] = set()
-            room_users[room].add(username)
+                room_users[room] = {}
+            room_users[room][username] = user_status
             
-            emit('join_status', {'status': 'success', 'room': room, 'password': password, 'history': []}, room=request.sid)
-            emit('room_users', {'users': list(room_users[room])}, room=room)
+            emit('join_status', {'status': 'success', 'room': room, 'password': password, 'history': [], 'polls': []}, room=request.sid)
+            emit('room_users', {'users': room_users[room]}, room=room)
             emit('message', {'username': 'System', 'msg': f'Group created and {username} joined.'}, room=room)
 
 @socketio.on('leave_group')
@@ -213,8 +241,8 @@ def handle_leave(data):
     username = data['username']
     leave_room(room)
     if room in room_users and username in room_users[room]:
-        room_users[room].remove(username)
-        emit('room_users', {'users': list(room_users[room])}, room=room)
+        del room_users[room][username]
+        emit('room_users', {'users': room_users[room]}, room=room)
     emit('message', {'username': 'System', 'msg': f'{username} left the room.'}, room=room)
 
 @socketio.on('send_message')
@@ -239,6 +267,54 @@ def handle_message(data):
         'file_url': file_url, 'file_name': file_name, 'reactions': {}, 'is_pinned': 0
     }, room=room)
 
+@socketio.on('create_poll')
+def handle_create_poll(data):
+    room = data['room']
+    question = data['question']
+    options = data['options'] # list of strings
+    username = data['username']
+    
+    initial_votes = {opt: [] for opt in options}
+    
+    with sqlite3.connect('database.db') as conn:
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO polls (room, question, options, votes, creator) VALUES (?, ?, ?, ?, ?)',
+                       (room, question, json.dumps(options), json.dumps(initial_votes), username))
+        conn.commit()
+        poll_id = cursor.lastrowid
+        
+    emit('new_poll', {
+        'id': poll_id, 'question': question, 'options': options, 'votes': initial_votes, 'creator': username
+    }, room=room)
+
+@socketio.on('vote_poll')
+def handle_vote_poll(data):
+    poll_id = data['poll_id']
+    option = data['option']
+    username = data['username']
+    room = data['room']
+    
+    with sqlite3.connect('database.db') as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT options, votes FROM polls WHERE id = ?', (poll_id,))
+        row = cursor.fetchone()
+        if row:
+            options = json.loads(row[0])
+            votes = json.loads(row[1])
+            
+            # Remove previous votes by this user in this poll
+            for opt in options:
+                if username in votes[opt]:
+                    votes[opt].remove(username)
+            
+            if option in votes:
+                votes[option].append(username)
+                
+            cursor.execute('UPDATE polls SET votes = ? WHERE id = ?', (json.dumps(votes), poll_id))
+            conn.commit()
+            
+            emit('update_poll', {'poll_id': poll_id, 'votes': votes}, room=room)
+
 @socketio.on('add_reaction')
 def handle_reaction(data):
     msg_id = data['msg_id']
@@ -251,7 +327,6 @@ def handle_reaction(data):
         cursor.execute('SELECT reactions FROM messages WHERE id = ?', (msg_id,))
         row = cursor.fetchone()
         if row:
-            import json
             reactions = json.loads(row[0] or '{}')
             if emoji not in reactions:
                 reactions[emoji] = []
